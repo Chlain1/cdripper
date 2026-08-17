@@ -115,4 +115,6 @@ while true; do
 
     eject
     cd ..
+
+    sleep 2
 done
