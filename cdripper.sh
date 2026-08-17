@@ -7,20 +7,24 @@ fi
 
 sanitize_filename() {
     printf '%s' "$1" \
-        | sed -E 's/[<>:"|?*]//g; s/[\\/]/_/g; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:cntrl:]]//g'
+    | sed -E 's/[<>:"|?*]//g; s/[\\/]/_/g; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:cntrl:]]//g'
 }
 
 fetch_metadata() {
     DISC_TITLE="Unknown Album"
     declare -Ag TRACK_NAMES
+    TRACK_NAMES=()   # reset, otherwise old entries from the previous CD can survive
 
     for i in $(seq 1 99); do
         TRACK_NAMES[$i]="Track $(printf '%02d' "$i")"
     done
 
-    if command -v cd-discid >/dev/null 2>&1; then
+    # Make sure the dotnet tool dir is actually on PATH (tilde is NOT expanded in quotes!)
+    export PATH="$PATH:$HOME/.dotnet/tools"
+
+    if command -v dotnet >/dev/null 2>&1; then
         local discid
-        discid="$(cd-discid 2>/dev/null | awk '{print $1}')"
+        discid="$(dotnet mbdiscid 2>/dev/null | grep -oP '(?<=MusicBrainz Disc ID : ).*' || true)"
 
         if [[ -n "$discid" && "$discid" != "0" ]]; then
             local musicbrainz_json
@@ -36,27 +40,23 @@ fetch_metadata() {
 
                     if [[ -n "$release_json" ]]; then
                         local album_title
-                        album_title="$(printf '%s' "$release_json" | jq -r '.title // empty' 2>/dev/null || true)"
+                        album_title="$(printf '%s' "$release_json" | jq -r '.title // (.["release-group"].title // empty)' 2>/dev/null || true)"
                         if [[ -n "$album_title" ]]; then
                             DISC_TITLE="$album_title"
                         fi
 
-                        local track_count
-                        track_count="$(printf '%s' "$release_json" | jq -r '.media[0].tracks | length // 0' 2>/dev/null || echo 0)"
-
-                        if [[ "$track_count" =~ ^[0-9]+$ && "$track_count" -gt 0 ]]; then
-                            for ((i = 1; i <= track_count; i++)); do
-                                local track_title
-                                track_title="$(printf '%s' "$release_json" | jq -r --argjson idx "$i" '.media[0].tracks[($idx - 1)].recording.title // empty' 2>/dev/null || true)"
-                                if [[ -n "$track_title" ]]; then
-                                    TRACK_NAMES[$i]="$track_title"
-                                fi
-                            done
-                        fi
+                        while IFS=$'\t' read -r track_num track_title; do
+                            [[ -z "$track_num" || -z "$track_title" ]] && continue
+                            if [[ "$track_num" =~ ^[0-9]+$ ]]; then
+                                TRACK_NAMES[$track_num]="$track_title"
+                            fi
+                        done < <(printf '%s' "$release_json" | jq -r '.media[]?.tracks[]? | select(.recording.title != null) | ((.position // .number // empty) | tostring) + "\t" + (.recording.title // "")' 2>/dev/null || true)
                     fi
                 fi
             fi
         fi
+    else
+        echo "dotnet (mbdiscid tool) not found, skipping MusicBrainz lookup"
     fi
 
     if [[ "$DISC_TITLE" == "Unknown Album" ]]; then
@@ -64,7 +64,7 @@ fetch_metadata() {
         cd_info="$(cd-info 2>/dev/null || true)"
         if [[ -n "$cd_info" ]]; then
             local derived_title
-            derived_title="$(printf '%s\n' "$cd_info" | grep -Ei 'album|disc|title' | head -n 1 | sed -E 's/.*(Album:|Disc:|Title:|album:|disc:|title:)[[:space:]]*//; s/[[:space:]]+$//' )"
+            derived_title="$(printf '%s\n' "$cd_info" | grep -E '^[[:space:]]*(Album|Disc|Title)[[:space:]]*:' | head -n 1 | sed -E 's/^[[:space:]]*(Album|Disc|Title)[[:space:]]*:[[:space:]]*//; s/[[:space:]]+$//' )"
             if [[ -n "$derived_title" ]]; then
                 DISC_TITLE="$derived_title"
             fi
@@ -103,7 +103,10 @@ while true; do
     cd "$ALBUM_DIR" || continue
 
     echo "Ripping: $DISC_TITLE"
-    if cdparanoia -B >/dev/null 2>&1; then
+    cdparanoia -B
+    rip_status=$?
+
+    if [ "$rip_status" -eq 0 ]; then
         rename_tracks
         echo "Saved in $ALBUM_DIR"
     else
