@@ -7,6 +7,8 @@ For the script to work, we need this dotnet tool, that calculates the hash of th
 dotnet tool install -g MetaBrainz.MusicBrainz.dotnet-mbdiscid
 ```
 
+You also need `ffmpeg` installed for MP3 encoding and writing metadata tags.
+
 ## Running the Script
 ```bash
 bash cdripper.sh

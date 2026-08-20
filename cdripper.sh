@@ -5,18 +5,33 @@ if ! [ -x "$(command -v cdparanoia)" ]; then
     exit 1
 fi
 
+if ! [ -x "$(command -v ffmpeg)" ]; then
+    echo "ffmpeg must be installed first!"
+    exit 1
+fi
+
 sanitize_filename() {
     printf '%s' "$1" \
     | sed -E 's/[<>:"|?*]//g; s/[\\/]/_/g; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//; s/[[:cntrl:]]//g'
 }
 
+sanitize_metadata() {
+    printf '%s' "$1" \
+    | tr '\r\n' '  ' \
+    | sed -E 's/[[:cntrl:]]//g; s/[[:space:]]+/ /g; s/^[[:space:]]+//; s/[[:space:]]+$//'
+}
+
 fetch_metadata() {
     DISC_TITLE="Unknown Album"
+    ALBUM_ARTIST="Unknown Artist"
     declare -Ag TRACK_NAMES
+    declare -Ag TRACK_ARTISTS
     TRACK_NAMES=()   # reset, otherwise old entries from the previous CD can survive
+    TRACK_ARTISTS=()
 
     for i in $(seq 1 99); do
         TRACK_NAMES[$i]="Track $(printf '%02d' "$i")"
+        TRACK_ARTISTS[$i]="$ALBUM_ARTIST"
     done
 
     # Make sure the dotnet tool dir is actually on PATH (tilde is NOT expanded in quotes!)
@@ -45,12 +60,23 @@ fetch_metadata() {
                             DISC_TITLE="$album_title"
                         fi
 
-                        while IFS=$'\t' read -r track_num track_title; do
+                        local release_artist
+                        release_artist="$(printf '%s' "$release_json" | jq -r '(."artist-credit" // []) | map(.name // .artist.name // empty) | map(select(length > 0)) | join(", ")' 2>/dev/null || true)"
+                        if [[ -n "$release_artist" ]]; then
+                            ALBUM_ARTIST="$release_artist"
+                        fi
+
+                        while IFS=$'\t' read -r track_num track_title track_artist; do
                             [[ -z "$track_num" || -z "$track_title" ]] && continue
                             if [[ "$track_num" =~ ^[0-9]+$ ]]; then
                                 TRACK_NAMES[$track_num]="$track_title"
+                                if [[ -n "$track_artist" ]]; then
+                                    TRACK_ARTISTS[$track_num]="$track_artist"
+                                else
+                                    TRACK_ARTISTS[$track_num]="$ALBUM_ARTIST"
+                                fi
                             fi
-                        done < <(printf '%s' "$release_json" | jq -r '.media[]?.tracks[]? | select(.recording.title != null) | ((.position // .number // empty) | tostring) + "\t" + (.recording.title // "")' 2>/dev/null || true)
+                        done < <(printf '%s' "$release_json" | jq -r '.media[]?.tracks[]? | select(.recording.title != null) | ((.position // .number // empty) | tostring) + "\t" + (.recording.title // "") + "\t" + (((."artist-credit" // .recording."artist-credit" // []) | map(.name // .artist.name // empty) | map(select(length > 0)) | join(", ")) // "")' 2>/dev/null || true)
                     fi
                 fi
             fi
@@ -72,9 +98,9 @@ fetch_metadata() {
     fi
 }
 
-rename_tracks() {
+convert_and_tag_tracks() {
     shopt -s nullglob
-    local file num title new_name
+    local file num title artist new_name
 
     for file in track*.wav; do
         num="${file#track}"
@@ -86,8 +112,21 @@ rename_tracks() {
         fi
 
         title="${TRACK_NAMES[$((10#$num))]:-Track $(printf '%02d' "$((10#$num))") }"
-        new_name="$(sanitize_filename "$(printf '%02d - %s.wav' "$((10#$num))" "$title")")"
-        mv -- "$file" "$new_name"
+        artist="${TRACK_ARTISTS[$((10#$num))]:-$ALBUM_ARTIST}"
+        new_name="$(sanitize_filename "$(printf '%02d - %s.mp3' "$((10#$num))" "$title")")"
+
+        if ffmpeg -loglevel error -y -i "$file" -codec:a libmp3lame -q:a 2 \
+            -id3v2_version 3 \
+            -metadata title="$(sanitize_metadata "$title")" \
+            -metadata album="$(sanitize_metadata "$DISC_TITLE")" \
+            -metadata artist="$(sanitize_metadata "$artist")" \
+            -metadata album_artist="$(sanitize_metadata "$ALBUM_ARTIST")" \
+            -metadata track="$((10#$num))" \
+            "$new_name"; then
+            rm -- "$file"
+        else
+            echo "Failed to encode $file to MP3"
+        fi
     done
 }
 
@@ -107,7 +146,7 @@ while true; do
     rip_status=$?
 
     if [ "$rip_status" -eq 0 ]; then
-        rename_tracks
+        convert_and_tag_tracks
         echo "Saved in $ALBUM_DIR"
     else
         echo "Rip failed for $DISC_TITLE"
