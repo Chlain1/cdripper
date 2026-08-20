@@ -113,7 +113,7 @@ convert_and_tag_tracks() {
 
         title="${TRACK_NAMES[$((10#$num))]:-Track $(printf '%02d' "$((10#$num))") }"
         artist="${TRACK_ARTISTS[$((10#$num))]:-$ALBUM_ARTIST}"
-        new_name="$(sanitize_filename "$(printf '%02d - %s.mp3' "$((10#$num))" "$title")")"
+        new_name="$(sanitize_filename "${title}.mp3")"
 
         if ffmpeg -loglevel error -y -i "$file" -codec:a libmp3lame -q:a 2 \
             -id3v2_version 3 \
